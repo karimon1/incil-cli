@@ -37,6 +37,14 @@ incil
 
 > İlk çalıştırmada `~/.local/share/incil/turkish.xml` (~5MB) otomatik olarak indirilir. Sonraki çalıştırmalarda ağ bağlantısı gerekmez.
 
+## Hızlı Kurulum
+```bash
+git clone https://github.com/karimon1/incil-cli.git
+cd incil-cli
+./install.sh
+```
+
+
 ## Kullanım
 
 ```bash
