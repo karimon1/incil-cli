@@ -4,6 +4,13 @@ Türkçe Yeni Ahit'ten terminal üzerinde ayet görüntüleyici.
 
 ![bash](https://img.shields.io/badge/bash-4.0%2B-green) ![platform](https://img.shields.io/badge/platform-Linux%20%7C%20macOS-blue) ![license](https://img.shields.io/badge/license-MIT-yellow)
 
+
+## Hızlı Kurulum
+```bash
+git clone https://github.com/karimon1/incil-cli.git
+cd incil-cli
+./install.sh
+```
 ## Kurulum
 
 **1. Repoyu klonla:**
@@ -36,13 +43,6 @@ incil
 ```
 
 > İlk çalıştırmada `~/.local/share/incil/turkish.xml` (~5MB) otomatik olarak indirilir. Sonraki çalıştırmalarda ağ bağlantısı gerekmez.
-
-## Hızlı Kurulum
-```bash
-git clone https://github.com/karimon1/incil-cli.git
-cd incil-cli
-./install.sh
-```
 
 
 ## Kullanım
