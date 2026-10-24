@@ -1,214 +1,443 @@
 #!/usr/bin/env bash
 # ─────────────────────────────────────────────────────────────────────────────
-#  incil — Türkçe Yeni Ahit ayet görüntüleyici
+#  incil — Türkçe Kutsal Kitap (Yorumsuz Türkçe Çeviri, YTC) terminalde
 #
 #  KULLANIM:
-#    incil              → rastgele ayet (tüm Yeni Ahit)
-#    incil -r           → rastgele ayet
-#    incil mat 3:16     → Matta 3:16
-#    incil yuh 1        → Yuhanna 1. bölümün tamamı
-#    incil -l           → kitap listesi
-#    incil -h           → yardım
+#    incil                  → rastgele ayet
+#    incil yuh 3:16         → Yuhanna 3:16
+#    incil yuh 3:16-18      → ayet aralığı
+#    incil yuh 3:16,18,20   → seçili ayetler
+#    incil mez 23           → Mezmurlar 23. bölüm
+#    incil 1 kor 13         → 1 Korintliler 13. bölüm
+#    incil rut              → kitabın tamamı
+#    incil yuh 3:16; rom 8:28   → birden fazla referans
+#    incil /sevgi           → tüm Kutsal Kitap'ta arama
+#    incil yuh/sevgi        → yalnızca Yuhanna'da arama
+#    incil -i               → etkileşimli mod
+#    incil -l               → kitap listesi
+#    incil -h               → yardım
 # ─────────────────────────────────────────────────────────────────────────────
 
-DATA_DIR="$HOME/.local/share/incil"
-DATA_FILE="$DATA_DIR/turkish.xml"
-DATA_URL="https://raw.githubusercontent.com/christos-c/bible-corpus/master/bibles/Turkish.xml"
+SURUM="2.0.0"
+VERI_ADI="ytc.tsv"
+VERI_URL="https://raw.githubusercontent.com/karimon1/incil-cli/main/data/$VERI_ADI"
+VERI_DIZIN="${XDG_DATA_HOME:-$HOME/.local/share}/incil"
 
-# ── Veri yoksa indir ──────────────────────────────────────────────────────────
-if [[ ! -f "$DATA_FILE" ]]; then
-  printf '\033[1;33mİncil verisi indiriliyor (bir kez)...\033[0m\n'
-  mkdir -p "$DATA_DIR"
+# ── Veri dosyasını bul (yoksa bir kez indir) ──────────────────────────────────
+veri_bul() {
+  local betik_dizin aday
+  betik_dizin="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+  for aday in "$INCIL_VERI" "$betik_dizin/data/$VERI_ADI" \
+              "$VERI_DIZIN/$VERI_ADI" "/usr/share/incil/$VERI_ADI"; do
+    [[ -n "$aday" && -s "$aday" ]] && { VERI="$aday"; return; }
+  done
+
+  printf '\033[1;33mKutsal Kitap verisi indiriliyor (bir kez)...\033[0m\n' >&2
+  mkdir -p "$VERI_DIZIN"
+  VERI="$VERI_DIZIN/$VERI_ADI"
   if command -v curl &>/dev/null; then
-    curl -fsSL "$DATA_URL" -o "$DATA_FILE"
+    curl -fsSL "$VERI_URL" -o "$VERI.tmp"
   elif command -v wget &>/dev/null; then
-    wget -qO "$DATA_FILE" "$DATA_URL"
+    wget -qO "$VERI.tmp" "$VERI_URL"
   else
     printf '\033[1;31mHata: curl veya wget bulunamadı.\033[0m\n' >&2; exit 1
   fi
-  if [[ ! -s "$DATA_FILE" ]]; then
-    printf '\033[1;31mHata: Dosya indirilemedi.\033[0m\n' >&2
-    rm -f "$DATA_FILE"; exit 1
+  if [[ ! -s "$VERI.tmp" ]]; then
+    printf '\033[1;31mHata: Veri indirilemedi.\033[0m\n' >&2
+    rm -f "$VERI.tmp"; exit 1
   fi
-  printf '\033[1;32mVeri kaydedildi: %s\033[0m\n' "$DATA_FILE"
-fi
-
-# ── Yeni Ahit XML kodları (grep pattern için) ─────────────────────────────────
-YA_PATTERN='b\.(MAT|MAR|LUK|JOH|ACT|ROM|COL|EPH|GAL|PHI|PHM|HEB|JAM|JUD|REV|TIT)\.'
-
-# ── Türkçe kısaltma → XML kodu ────────────────────────────────────────────────
-kitap_kodu() {
-  case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-    # Dört Müjde
-    mat|matta)                printf 'MAT' ;;
-    mar|mrk|markos)           printf 'MAR' ;;
-    luk|luka)                 printf 'LUK' ;;
-    yuh|yuhanna)              printf 'JOH' ;;
-    # Elçilerin İşleri
-    isi|act|elciler)          printf 'ACT' ;;
-    # Pavlus Mektupları
-    rom|romalılar|romaliwlar) printf 'ROM' ;;
-    gal|galatlar)             printf 'GAL' ;;
-    efe|efesliler)            printf 'EPH' ;;
-    phi|flp|filipililer)      printf 'PHI' ;;
-    kol|koloseliler)          printf 'COL' ;;
-    tit|titus)                printf 'TIT' ;;
-    flm|phm|filimona)         printf 'PHM' ;;
-    # Genel Mektuplar
-    ibr|heb|ibraniler)        printf 'HEB' ;;
-    yak|jam|yakup)            printf 'JAM' ;;
-    yah|jud|yahuda)           printf 'JUD' ;;
-    # Vahiy
-    vah|rev|vahiy)            printf 'REV' ;;
-    *)                        printf ''    ;;
-  esac
+  mv "$VERI.tmp" "$VERI"
+  printf '\033[1;32mVeri kaydedildi: %s\033[0m\n' "$VERI" >&2
 }
 
-# ── XML kodu → Türkçe ad ──────────────────────────────────────────────────────
-kitap_adi() {
-  case "$1" in
-    MAT) printf 'Matta'             ;;
-    MAR) printf 'Markos'            ;;
-    LUK) printf 'Luka'              ;;
-    JOH) printf 'Yuhanna'           ;;
-    ACT) printf 'Elçilerin İşleri'  ;;
-    ROM) printf 'Romalılar'         ;;
-    GAL) printf 'Galatlar'          ;;
-    EPH) printf 'Efesliler'         ;;
-    PHI) printf 'Filipililer'       ;;
-    COL) printf 'Koloseliler'       ;;
-    TIT) printf 'Titus'             ;;
-    PHM) printf 'Filimona'          ;;
-    HEB) printf 'İbraniler'         ;;
-    JAM) printf 'Yakup'             ;;
-    JUD) printf 'Yahuda'            ;;
-    REV) printf 'Vahiy'             ;;
-  esac
+# ── awk programı ──────────────────────────────────────────────────────────────
+#  LC_ALL=C altında çalışır: Türkçe harfler bayt dizisi olarak ele alınır,
+#  karakter genişliği UTF-8 devam baytları sayılarak hesaplanır.
+read -r -d '' AWK_PROG <<'AWK'
+function katla(s) {
+  s = tolower(s)
+  gsub(/İ|ı|Î|î/, "i", s); gsub(/Ç|ç/, "c", s); gsub(/Ş|ş/, "s", s)
+  gsub(/Ğ|ğ/, "g", s);     gsub(/Ü|ü|Û|û/, "u", s); gsub(/Ö|ö/, "o", s)
+  gsub(/Â|â/, "a", s)
+  return s
+}
+function anahtar(s) { s = katla(s); gsub(/[^a-z0-9]/, "", s); return s }
+function kirp(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+function uzunluk(s,   t) { t = s; return length(s) - gsub(/[\200-\277]/, "", t) }
+
+function kitaplar(   satirlar, n, i, k, a, j) {
+  n = split("\
+1|Yaratılış|yar|gen,tekvin\n\
+2|Çıkış|çık|exo\n\
+3|Levililer|lev|\n\
+4|Sayılar|say|num\n\
+5|Yasa\047nın Tekrarı|yas|tes,deu,yasanintekrari\n\
+6|Yeşu|yşu|yesu,jos\n\
+7|Hâkimler|hak|jdg\n\
+8|Rut|rut|\n\
+9|1 Samuel|1sa|\n\
+10|2 Samuel|2sa|\n\
+11|1 Krallar|1kr|1ki\n\
+12|2 Krallar|2kr|2ki\n\
+13|1 Tarihler|1ta|1ch\n\
+14|2 Tarihler|2ta|2ch\n\
+15|Ezra|ezr|\n\
+16|Nehemya|neh|\n\
+17|Ester|est|\n\
+18|İyov|iyo|eyu,eyup,job\n\
+19|Mezmurlar|mez|zebur,psa\n\
+20|Özdeyişler|özd|sul,pro\n\
+21|Vaiz|vai|ecc\n\
+22|Solomon\047un Ezgisi|ezg|sol,ezgiler,neşideler,sng\n\
+23|Yeşaya|yşa|yesaya,isa\n\
+24|Yeremya|yer|jer\n\
+25|Ağıtlar|ağı|lam\n\
+26|Hezekiel|hez|eze\n\
+27|Daniel|dan|\n\
+28|Hoşea|hoş|\n\
+29|Yoel|yoe|\n\
+30|Amos|amo|\n\
+31|Ovadya|ova|oba\n\
+32|Yona|yon|yunus\n\
+33|Mika|mik|mic\n\
+34|Nahum|nah|\n\
+35|Habakkuk|hab|\n\
+36|Sefanya|sef|zep\n\
+37|Hagay|hag|\n\
+38|Zekariya|zek|zec\n\
+39|Malaki|mal|\n\
+40|Matta|mat|\n\
+41|Markos|mar|mrk\n\
+42|Luka|luk|\n\
+43|Yuhanna|yuh|yu,jhn\n\
+44|Elçilerin İşleri|elç|isi,act,res\n\
+45|Romalılar|rom|\n\
+46|1 Korintliler|1ko|1kor,1co\n\
+47|2 Korintliler|2ko|2kor,2co\n\
+48|Galatyalılar|gal|galatlar\n\
+49|Efesliler|efe|ef,eph\n\
+50|Filipililer|flp|fil,phi,php\n\
+51|Koloseliler|kol|col\n\
+52|1 Selanikliler|1se|1sel,1th\n\
+53|2 Selanikliler|2se|2sel,2th\n\
+54|1 Timoteos|1ti|1tim\n\
+55|2 Timoteos|2ti|2tim\n\
+56|Titus|tit|\n\
+57|Filimon|flm|phm,filimona\n\
+58|İbraniler|ibr|heb\n\
+59|Yakov|yak|yakup,jas,jam\n\
+60|1 Petrus|1pe|1pet\n\
+61|2 Petrus|2pe|2pet\n\
+62|1 Yuhanna|1yu|1yuh,1jn\n\
+63|2 Yuhanna|2yu|2yuh,2jn\n\
+64|3 Yuhanna|3yu|3yuh,3jn\n\
+65|Yahuda|yah|jud\n\
+66|Vahiy|vah|rev", satirlar, "\n")
+  for (i = 1; i <= n; i++) {
+    split(satirlar[i], k, "|")
+    AD[k[1]] = k[2]; KISA[k[1]] = k[3]
+    TAM[k[1]] = anahtar(k[2])
+    TAKMA[anahtar(k[3])] = k[1]
+    split(k[4], a, ",")
+    for (j in a) TAKMA[anahtar(a[j])] = k[1]
+  }
+  KITAP_SAY = n
 }
 
-# ── Kitap listesi ─────────────────────────────────────────────────────────────
-liste() {
-  printf '\n'
-  printf '  \033[1;37mYENİ AHİT KİTAPLARI\033[0m\n'
-  printf '  \033[1;30m──────────────────────────────────────────────────\033[0m\n\n'
-  printf '  \033[1;33mMüjdeler\033[0m\n'
-  printf '    mat   → Matta\n'
-  printf '    mar   → Markos\n'
-  printf '    luk   → Luka\n'
-  printf '    yuh   → Yuhanna\n\n'
-  printf '  \033[1;33mElçilerin İşleri\033[0m\n'
-  printf '    isi   → Elçilerin İşleri\n\n'
-  printf '  \033[1;33mPavlus Mektupları\033[0m\n'
-  printf '    rom   → Romalılar\n'
-  printf '    gal   → Galatlar\n'
-  printf '    efe   → Efesliler\n'
-  printf '    phi   → Filipililer\n'
-  printf '    kol   → Koloseliler\n'
-  printf '    tit   → Titus\n'
-  printf '    flm   → Filimona\n\n'
-  printf '  \033[1;33mGenel Mektuplar\033[0m\n'
-  printf '    ibr   → İbraniler\n'
-  printf '    yak   → Yakup\n'
-  printf '    yah   → Yahuda\n\n'
-  printf '  \033[1;33mVahiy\033[0m\n'
-  printf '    vah   → Vahiy\n'
-  printf '\n'
+# Kısaltma / takma ad tam eşleşmesi, yoksa kitap adının başıyla eşleşme
+function kitap_coz(s,   k, i) {
+  k = anahtar(s)
+  if (k == "") return 0
+  if (k in TAKMA) return TAKMA[k]
+  for (i = 1; i <= KITAP_SAY; i++) if (index(TAM[i], k) == 1) return i
+  return 0
 }
 
-# ── Yardım ────────────────────────────────────────────────────────────────────
+function hata(m) { printf "%s\n", m > "/dev/stderr"; HATA = 1 }
+
+# Aralık ekle: ref r, kitap b, başlangıç/bitiş (bölüm*1000+ayet)
+function aralik(r, b, alt, ust) {
+  AR_SAY[r]++
+  AR_B[r, AR_SAY[r]] = b; AR_ALT[r, AR_SAY[r]] = alt; AR_UST[r, AR_SAY[r]] = ust
+}
+
+function ref_coz(r, metin,   kitap_k, sayi, b, parca, n, i, p, a, bas, s2, son, bolum) {
+  REF[r] = metin
+  if (index(metin, "/")) {
+    kitap_k = kirp(substr(metin, 1, index(metin, "/") - 1))
+    ARA[r] = katla(kirp(substr(metin, index(metin, "/") + 1)))
+    if (ARA[r] == "") { hata("Boş arama: " metin); return }
+    if (kitap_k == "") { ARA_B[r] = 0; return }
+    if (!(ARA_B[r] = kitap_coz(kitap_k))) hata("Tanınmayan kitap: \"" kitap_k "\"  (liste için: incil -l)")
+    return
+  }
+
+  if (!match(metin, /^[1-3]?[ .]*[^0-9 :.,;-][^0-9:]*/)) { hata("Anlaşılamayan referans: " metin); return }
+  kitap_k = substr(metin, 1, RLENGTH)
+  sayi = substr(metin, RLENGTH + 1); gsub(/[ \t]/, "", sayi)
+  if (!(b = kitap_coz(kitap_k))) { hata("Tanınmayan kitap: \"" kirp(kitap_k) "\"  (liste için: incil -l)"); return }
+
+  if (sayi == "") { aralik(r, b, 0, 999999); return }
+
+  n = split(sayi, parca, ",")
+  bolum = 0
+  for (i = 1; i <= n; i++) {
+    p = parca[i]
+    if (p ~ /^[0-9]+$/) {
+      if (bolum) aralik(r, b, bolum * 1000 + p, bolum * 1000 + p)
+      else       aralik(r, b, p * 1000, p * 1000 + 999)
+    } else if (p ~ /^[0-9]+-[0-9]+$/) {
+      split(p, a, "-")
+      if (bolum) aralik(r, b, bolum * 1000 + a[1], bolum * 1000 + a[2])
+      else       aralik(r, b, a[1] * 1000, a[2] * 1000 + 999)
+    } else if (p ~ /^[0-9]+:[0-9]+(-[0-9]+(:[0-9]+)?)?$/) {
+      split(p, a, "-")
+      split(a[1], bas, ":"); bolum = bas[1] + 0
+      if (a[2] == "")             son = bolum * 1000 + bas[2]
+      else if (index(a[2], ":")) { split(a[2], s2, ":"); son = s2[1] * 1000 + s2[2] }
+      else                        son = bolum * 1000 + a[2]
+      aralik(r, b, bolum * 1000 + bas[2], son)
+    } else if (p ~ /^[0-9]+:$/) {
+      bolum = p + 0
+      aralik(r, b, bolum * 1000, bolum * 1000 + 999)
+    } else {
+      hata("Anlaşılamayan ayet belirtimi: \"" p "\" (" metin ")"); return
+    }
+  }
+}
+
+function sakla(r) {
+  n = ++BUL[r]
+  S_B[r, n] = $3; S_C[r, n] = $4; S_V[r, n] = $5; S_T[r, n] = $6
+}
+
+# Metni genişliğe göre sar; ilk satır önüne `bas`, sonrakilere `girinti`
+function sar(metin, gen, bas, girinti,   n, k, i, satir, su, ku) {
+  n = split(metin, k, " ")
+  satir = ""; su = 0
+  for (i = 1; i <= n; i++) {
+    ku = uzunluk(k[i])
+    if (su && su + 1 + ku > gen) { print bas satir; bas = girinti; satir = k[i]; su = ku }
+    else if (su) { satir = satir " " k[i]; su += 1 + ku }
+    else { satir = k[i]; su = ku }
+  }
+  print bas satir
+}
+
+function boya(kod, s) { return RENK ? "\033[" kod "m" s "\033[0m" : s }
+
+function liste(   grup, i) {
+  grup[1] = "Tevrat"; grup[6] = "Tarih Kitapları"; grup[18] = "Şiir ve Bilgelik"
+  grup[23] = "Peygamberler"; grup[40] = "Müjdeler"; grup[44] = "Elçilerin İşleri"
+  grup[45] = "Pavlus\047un Mektupları"; grup[58] = "Genel Mektuplar"; grup[66] = "Vahiy"
+  print ""
+  print "  " boya("1;37", "ESKİ ANTLAŞMA")
+  for (i = 1; i <= KITAP_SAY; i++) {
+    if (i == 40) { print ""; print "  " boya("1;37", "YENİ ANTLAŞMA") }
+    if (i in grup) { print ""; print "  " boya("1;33", grup[i]) }
+    printf "    %s%s %s\n", boya("0;36", KISA[i]), substr("      ", 1, 6 - uzunluk(KISA[i])), AD[i]
+  }
+  print ""
+}
+
+BEGIN {
+  FS = "\t"
+  kitaplar()
+  if (GEN < 30) GEN = 30
+  if (MOD == "liste") { liste(); exit }
+  if (MOD == "rastgele") { srand(TOHUM); REF_SAY = 1 }
+  else {
+    REF_SAY = split(GIRDI, refler, ";")
+    for (r = 1; r <= REF_SAY; r++) {
+      refler[r] = kirp(refler[r])
+      if (refler[r] == "") { REF_SAY--; for (j = r; j <= REF_SAY; j++) refler[j] = refler[j + 1]; r--; continue }
+      ref_coz(r, refler[r])
+    }
+    if (HATA) exit 1
+  }
+}
+
+MOD == "rastgele" { if (rand() * NR < 1) { BUL[1] = 0; sakla(1) } ; next }
+
+{
+  anah = $4 * 1000 + $5
+  for (r = 1; r <= REF_SAY; r++) {
+    if (r in ARA) {
+      if ((!ARA_B[r] || ARA_B[r] == $3) && katla($6) ~ ARA[r]) sakla(r)
+      continue
+    }
+    for (i = 1; i <= AR_SAY[r]; i++)
+      if (AR_B[r, i] == $3 && anah >= AR_ALT[r, i] && anah <= AR_UST[r, i]) { sakla(r); break }
+  }
+}
+
+END {
+  if (MOD == "liste" || HATA) exit HATA
+  ilk = 1
+  for (r = 1; r <= REF_SAY; r++) {
+    if (!BUL[r]) { hata(MOD == "rastgele" ? "Veri okunamadı." : "Bulunamadı: " REF[r]); continue }
+
+    if (r in ARA) {
+      for (n = 1; n <= BUL[r]; n++) {
+        yer = AD[S_B[r, n]] " " S_C[r, n] ":" S_V[r, n]
+        if (!GUZEL) { print yer "\t" S_T[r, n]; continue }
+        print "  " boya("1;33", yer)
+        sar(S_T[r, n], GEN - 4, "    ", "    ")
+      }
+      if (GUZEL) printf "\n  %s\n", boya("1;30", BUL[r] " sonuç: \"" substr(REF[r], index(REF[r], "/") + 1) "\"")
+      continue
+    }
+
+    if (!GUZEL) {
+      for (n = 1; n <= BUL[r]; n++) print AD[S_B[r, n]] " " S_C[r, n] ":" S_V[r, n] "\t" S_T[r, n]
+      continue
+    }
+
+    if (BUL[r] == 1) {                       # tek ayet: alıntı biçimi
+      if (!ilk) print ""
+      sar("\"" S_T[r, 1] "\"", GEN - 4, "  " (RENK ? "\033[0;36m" : ""), "  ")
+      if (RENK) printf "\033[0m"
+      print "  " boya("1;33", "— " AD[S_B[r, 1]] " " S_C[r, 1] ":" S_V[r, 1])
+      ilk = 0
+      continue
+    }
+
+    onceki = ""
+    for (n = 1; n <= BUL[r]; n++) {
+      baslik = AD[S_B[r, n]] " " S_C[r, n]
+      if (baslik != onceki) {
+        if (!ilk) print ""
+        print "  " boya("1;37", baslik)
+        print "  " boya("1;30", "────────────────────────────────────────")
+        onceki = baslik; ilk = 0
+      }
+      sar(S_T[r, n], GEN - 7, "  " boya("0;32", sprintf("%3d", S_V[r, n])) "  ", "       ")
+    }
+  }
+  exit HATA
+}
+AWK
+
+# ── Çalıştır: mod, girdi ──────────────────────────────────────────────────────
+calistir() {
+  local guzel=0 renk=0 gen=80
+  if [[ -t 1 ]]; then
+    guzel=1
+    [[ -z "$NO_COLOR" ]] && renk=1
+    gen=$(tput cols 2>/dev/null || echo 80)
+    (( gen > 90 )) && gen=90
+  fi
+  LC_ALL=C awk -v MOD="$1" -v GIRDI="$2" -v GUZEL="$guzel" -v RENK="$renk" \
+    -v GEN="$gen" -v TOHUM="$RANDOM$RANDOM" "$AWK_PROG" "$VERI"
+}
+
+# Uçbirimde uzun çıktıyı sayfalayıcıya ver
+goster() {
+  if [[ -t 1 && -z "$SAYFASIZ" ]] && command -v "${INCIL_PAGER%% *}" &>/dev/null; then
+    calistir "$@" | $INCIL_PAGER
+    return "${PIPESTATUS[0]}"
+  fi
+  calistir "$@"
+}
+
 yardim() {
-  printf '\n'
-  printf '  \033[1;37mKULLANIM\033[0m\n'
-  printf '    incil              → rastgele ayet (tüm Yeni Ahit)\n'
-  printf '    incil -r           → rastgele ayet\n'
-  printf '    incil mat 3:16     → Matta 3:16\n'
-  printf '    incil yuh 1        → Yuhanna 1. bölümün tamamı\n'
-  printf '    incil -l           → tüm kitap listesi ve kısaltmalar\n'
-  printf '    incil -h           → bu yardım\n'
+  cat <<EOF
+
+  incil $SURUM — Türkçe Kutsal Kitap (Yorumsuz Türkçe Çeviri)
+
+  KULLANIM
+    incil                     rastgele ayet
+    incil yuh 3:16            tek ayet
+    incil yuh 3:16-18         ayet aralığı
+    incil yuh 3:16,18,20      seçili ayetler
+    incil yuh 3:16-4:3        bölümler arası aralık
+    incil mez 23              bölümün tamamı
+    incil mez 1-3             birden fazla bölüm
+    incil rut                 kitabın tamamı
+    incil 1 kor 13            numaralı kitaplar (1kor, 1ko, "1 Korintliler")
+    incil yuh 3:16; rom 8:28  birden fazla referans (; ile)
+    incil /sevgi              tüm Kutsal Kitap'ta arama
+    incil yuh/ışık            yalnızca bir kitapta arama
+
+  SEÇENEKLER
+    -i, --etkilesimli         etkileşimli mod (incil> istemi)
+    -r, --rastgele            rastgele ayet
+    -l, --liste               kitaplar ve kısaltmalar
+    -n, --sayfasiz            sayfalayıcı (less) kullanma
+    -v, --surum               sürüm ve çeviri bilgisi
+    -h, --yardim              bu yardım
+
+  Kitap adları büyük/küçük harf ve Türkçe karakter duyarsızdır:
+  "çık", "cik", "Çıkış" aynı kitaptır. Arama da Türkçe karakter duyarsızdır.
+
+  Ortam değişkenleri: INCIL_PAGER (varsayılan: less -RF), NO_COLOR, INCIL_VERI
+
+EOF
+}
+
+surum() {
+  cat <<EOF
+incil $SURUM
+
+Metin: Yorumsuz Türkçe Çeviri (YTC)
+       Copyright © 2023-2025 İsmail Serinken and eBible.org
+       Creative Commons Attribution-No Derivatives 4.0 (CC BY-ND 4.0)
+       https://ebible.org/details.php?id=turytc
+Veri:  $VERI
+EOF
+}
+
+etkilesimli() {
+  printf '\n  incil %s — referans ya da /arama yazın; ?: yardım, r: rastgele, l: liste, q: çıkış\n\n' "$SURUM"
+  local satir
+  while IFS= read -e -r -p 'incil> ' satir; do
+    satir="${satir#"${satir%%[![:space:]]*}"}"
+    [[ -n "$satir" ]] && history -s -- "$satir"
+    case "$satir" in
+      '')          continue ;;
+      q|Q|çık|cik|exit) break ;;
+      '?'|h|yardım) yardim ;;
+      l|liste)     goster liste "" ;;
+      r|rastgele)  calistir rastgele "" ;;
+      *)           goster ayet "$satir" ;;
+    esac
+  done
   printf '\n'
 }
 
-# ── Ayeti ekrana bas ──────────────────────────────────────────────────────────
-ayeti_goster() {
-  local id_satir="$1"
-  local satir_no seg_id kod bolum ayet_no metin
+# ── Argümanlar ────────────────────────────────────────────────────────────────
+INCIL_PAGER="${INCIL_PAGER:-less -RF}"
+SAYFASIZ=""
+MOD=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h|--help|--yardim)        yardim; exit 0 ;;
+    -n|--no-pager|--sayfasiz)  SAYFASIZ=1; shift ;;
+    -l|--liste)                MOD=liste; shift ;;
+    -r|--random|--rastgele)    MOD=rastgele; shift ;;
+    -i|--etkilesimli)          MOD=etkilesimli; shift ;;
+    -v|-V|--version|--surum)   MOD=surum; shift ;;
+    --)                        shift; break ;;
+    -?*)  printf '\033[1;31mHata: Bilinmeyen seçenek: %s\033[0m  (yardım: incil -h)\n' "$1" >&2; exit 1 ;;
+    *)    break ;;
+  esac
+done
 
-  satir_no=$(printf '%s' "$id_satir" | cut -d: -f1)
-  seg_id=$(printf '%s' "$id_satir" \
-    | grep -oE 'b\.(MAT|MAR|LUK|JOH|ACT|ROM|COL|EPH|GAL|PHI|PHM|HEB|JAM|JUD|REV|TIT)\.[0-9]+\.[0-9]+')
+case "$MOD" in
+  liste) goster liste ""; exit ;;
+esac
 
-  metin=$(sed -n "$((satir_no + 1))p" "$DATA_FILE" \
-    | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+veri_bul
 
-  kod=$(    printf '%s' "$seg_id" | cut -d. -f2)
-  bolum=$(  printf '%s' "$seg_id" | cut -d. -f3)
-  ayet_no=$(printf '%s' "$seg_id" | cut -d. -f4)
-
-  printf '  \033[0;36m"%s"\033[0m\n' "$metin"
-  printf '  \033[1;33m— %s %s:%s\033[0m\n\n' "$(kitap_adi "$kod")" "$bolum" "$ayet_no"
-}
-
-# ── Argüman ayrıştırma ────────────────────────────────────────────────────────
-case "$1" in
-
-  -h|--help)
-    yardim; exit 0 ;;
-
-  -l|--liste)
-    liste; exit 0 ;;
-
-  ''|-r|--random)
-    ID_SATIR=$(grep -nE "$YA_PATTERN" "$DATA_FILE" | shuf -n 1)
-    if [[ -z "$ID_SATIR" ]]; then
-      printf '\033[1;31mHata: Veri okunamadı.\033[0m\n' >&2; exit 1
-    fi
-    printf '\n'
-    ayeti_goster "$ID_SATIR"
-    ;;
-
+case "$MOD" in
+  surum)        surum ;;
+  etkilesimli)  etkilesimli ;;
+  rastgele)     calistir rastgele "" ;;
   *)
-    KOD=$(kitap_kodu "$1")
-    if [[ -z "$KOD" ]]; then
-      printf '\033[1;31mHata: Tanınmayan kitap: "%s"\033[0m\n' "$1" >&2
-      printf 'Kitap listesi için: incil -l\n' >&2; exit 1
-    fi
-    AD=$(kitap_adi "$KOD")
-
-    if [[ -z "$2" ]]; then
-      printf '\033[1;33mİpucu:\033[0m Bölüm belirtin → incil %s 1\n' "$1" >&2
-      exit 1
-    fi
-
-    if printf '%s' "$2" | grep -q ':'; then
-      # ── Tek ayet ────────────────────────────────────────────────────────────
-      BOLUM=$(printf '%s' "$2" | cut -d: -f1)
-      AYET=$( printf '%s' "$2" | cut -d: -f2)
-      ID_SATIR=$(grep -nF "b.${KOD}.${BOLUM}.${AYET}" "$DATA_FILE")
-
-      if [[ -z "$ID_SATIR" ]]; then
-        printf '\033[1;31mHata: %s %s:%s bulunamadı.\033[0m\n' "$AD" "$BOLUM" "$AYET" >&2
-        exit 1
-      fi
-      printf '\n'
-      ayeti_goster "$ID_SATIR"
-
+    if [[ $# -eq 0 ]]; then
+      calistir rastgele ""
     else
-      # ── Tüm bölüm ───────────────────────────────────────────────────────────
-      BOLUM="$2"
-      SATIRLAR=$(grep -nF "b.${KOD}.${BOLUM}." "$DATA_FILE")
-
-      if [[ -z "$SATIRLAR" ]]; then
-        printf '\033[1;31mHata: %s %s. bölüm bulunamadı.\033[0m\n' "$AD" "$BOLUM" >&2
-        exit 1
-      fi
-
-      printf '\n'
-      printf '  \033[1;37m%s — %s. Bölüm\033[0m\n' "$AD" "$BOLUM"
-      printf '  \033[1;30m──────────────────────────────────────────────────\033[0m\n\n'
-
-      while IFS= read -r satir; do
-        ayeti_goster "$satir"
-      done <<< "$SATIRLAR"
+      goster ayet "$*"
     fi
     ;;
 esac

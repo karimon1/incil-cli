@@ -1,0 +1,18 @@
+Yorumsuz Türkçe Çeviri (YTC)
+The Holy Bible in the Turkish Language, translated from the World English Bible
+Copyright © 2023-2025 İsmail Serinken and eBible.org
+
+Source: https://ebible.org/details.php?id=turytc
+
+This translation is made available under the terms of the
+Creative Commons Attribution-No Derivatives license 4.0
+(https://creativecommons.org/licenses/by-nd/4.0/).
+
+You may share and redistribute this Bible translation or extracts from it
+in any format, provided that:
+  - You include the above copyright and source information.
+  - You do not make any derivative works that change any of the actual
+    words or punctuation of the Scriptures.
+
+ytc.tsv is a format conversion of turytc_vpl.txt (scripts/ytc-tsv.sh);
+the words and punctuation of the Scriptures are unchanged.

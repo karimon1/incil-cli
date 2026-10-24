@@ -1,7 +1,10 @@
 /*
- * incil-tui — Türkçe Yeni Ahit TUI görüntüleyici
- * Derleme: gcc -o incil-tui incil_tui.c -lncurses
- * Bağımlılık: ncurses
+ * incil-tui — Türkçe Kutsal Kitap (Yorumsuz Türkçe Çeviri) TUI görüntüleyici
+ * Derleme: make   (ya da: gcc -o incil-tui incil_tui.c -lncursesw)
+ * Bağımlılık: ncurses (geniş karakter desteğiyle)
+ *
+ * Veri: incil ile aynı ytc.tsv dosyası
+ *   Kitap ⇥ kısaltma ⇥ kitap no ⇥ bölüm ⇥ ayet ⇥ metin
  */
 
 #include <ncurses.h>
@@ -9,383 +12,398 @@
 #include <stdlib.h>
 #include <string.h>
 #include <locale.h>
+#include <time.h>
 
-#define MAX_KITAP    16
-#define MAX_BOLUM   200
-#define MAX_METIN  1024
-
-#define DATA_PATH   "%s/.local/share/incil/turkish.xml"
-
-typedef struct {
-    const char *kod;
-    const char *ad;
-} Kitap;
-
-static const Kitap KITAPLAR[MAX_KITAP] = {
-    {"MAT", "Matta"},
-    {"MAR", "Markos"},
-    {"LUK", "Luka"},
-    {"JOH", "Yuhanna"},
-    {"ACT", "Elçilerin İşleri"},
-    {"ROM", "Romalılar"},
-    {"GAL", "Galatlar"},
-    {"EPH", "Efesliler"},
-    {"PHI", "Filipililer"},
-    {"COL", "Koloseliler"},
-    {"HEB", "İbraniler"},
-    {"JAM", "Yakup"},
-    {"JUD", "Yahuda"},
-    {"TIT", "Titus"},
-    {"PHM", "Filimona"},
-    {"REV", "Vahiy"},
-};
+#define MAX_KITAP   66
+#define MAX_SATIR 8192
+#define VERI_ADI  "ytc.tsv"
 
 typedef struct {
-    int  bolum;
-    int  ayet;
-    char metin[MAX_METIN];
+    int   kitap;          /* 0..65 */
+    int   bolum;
+    int   ayet;
+    char *metin;
 } Ayet;
+
+typedef struct {
+    char ad[64];
+    char kisa[16];
+    int  ilk;             /* ilk ayetin g_ayetler içindeki sırası */
+    int  bolum_say;
+} Kitap;
 
 static Ayet  *g_ayetler  = NULL;
 static int    g_ayet_say = 0;
-static int    g_ayet_cap = 0;
-static char   g_data_file[512];
+static Kitap  g_kitaplar[MAX_KITAP];
+static int    g_kitap_say = 0;
 
-/* ── XML parse ───────────────────────────────────────────── */
-static int veri_yukle(const char *kitap_kodu)
+/* Ekrana basılacak sarılmış satırlar (seçili bölüm için) */
+typedef struct {
+    int         ayet;     /* satır bir ayetin ilk satırıysa ayet no, değilse 0 */
+    const char *bas;
+    int         uzunluk;  /* bayt */
+} Satir;
+
+static Satir *g_satirlar = NULL;
+static int    g_satir_say = 0, g_satir_cap = 0;
+
+/* ── Veri dosyasını bul ──────────────────────────────────── */
+static const char *veri_yolu(void)
 {
-    FILE *fp = fopen(g_data_file, "r");
+    static char aday[5][1024];
+    const char *env  = getenv("INCIL_VERI");
+    const char *xdg  = getenv("XDG_DATA_HOME");
+    const char *home = getenv("HOME");
+
+    if (env)  snprintf(aday[0], sizeof(aday[0]), "%s", env);
+    if (xdg)  snprintf(aday[1], sizeof(aday[1]), "%s/incil/%s", xdg, VERI_ADI);
+    if (home) snprintf(aday[2], sizeof(aday[2]), "%s/.local/share/incil/%s", home, VERI_ADI);
+    snprintf(aday[3], sizeof(aday[3]), "/usr/share/incil/%s", VERI_ADI);
+    snprintf(aday[4], sizeof(aday[4]), "data/%s", VERI_ADI);
+
+    for (int i = 0; i < 5; i++) {
+        FILE *fp;
+        if (!aday[i][0] || !(fp = fopen(aday[i], "r"))) continue;
+        fclose(fp);
+        return aday[i];
+    }
+    return NULL;
+}
+
+/* ── TSV yükle ───────────────────────────────────────────── */
+static int veri_yukle(const char *yol)
+{
+    FILE *fp = fopen(yol, "r");
     if (!fp) return -1;
 
-    free(g_ayetler);
-    g_ayetler  = NULL;
-    g_ayet_say = 0;
-    g_ayet_cap = 0;
-
-    /* Aranacak prefix: b.MAT. */
-    char aranan[32];
-    snprintf(aranan, sizeof(aranan), "b.%s.", kitap_kodu);
-    size_t aranan_len = strlen(aranan);
-
-    char line[MAX_METIN * 2];
-    int  in_verse  = 0;
-    int  cur_bolum = 0, cur_ayet = 0;
-
+    char line[MAX_SATIR];
+    int cap = 0;
     while (fgets(line, sizeof(line), fp)) {
-        /* Baştaki boşluk/tab'ı atla */
+        line[strcspn(line, "\r\n")] = '\0';
+
+        char *alan[6];
         char *p = line;
-        while (*p == ' ' || *p == '\t') p++;
-
-        if (!in_verse) {
-            /* <seg id="b.MAT.3.16" type="verse"> satırını ara */
-            char *seg = strstr(p, "<seg id=\"");
-            if (!seg) continue;
-
-            /* "<seg id=\"" = 9 karakter → hemen arkası "b.XXX..." */
-            const char *id_start = seg + 9;
-
-            /* Kitap kodu eşleşiyor mu? */
-            if (strncmp(id_start, aranan, aranan_len) != 0) continue;
-
-            /* b.MAT.BOLUM.AYET → noktaları say */
-            /* id_start = "b.MAT.3.16\"..." */
-            const char *s = id_start;
-            s = strchr(s, '.');       /* b. → geç */
-            if (!s) continue;
-            s = strchr(s + 1, '.');   /* MAT. → geç */
-            if (!s) continue;
-            cur_bolum = atoi(s + 1);
-            s = strchr(s + 1, '.');   /* BOLUM. → geç */
-            if (!s) continue;
-            cur_ayet = atoi(s + 1);
-
-            in_verse = 1;
-
-        } else {
-            /* Bir sonraki satır = ayet metni (</seg> değilse) */
-            if (strstr(p, "</seg>") || strstr(p, "<seg")) {
-                in_verse = 0;
-                continue;
-            }
-
-            /* Sondaki \n \r ve boşlukları temizle */
-            int len = (int)strlen(p);
-            while (len > 0 && (p[len-1] == '\n' || p[len-1] == '\r' ||
-                                p[len-1] == ' '  || p[len-1] == '\t'))
-                p[--len] = '\0';
-
-            if (len == 0) { in_verse = 0; continue; }
-
-            /* Kapasiteyi genişlet */
-            if (g_ayet_say >= g_ayet_cap) {
-                g_ayet_cap = g_ayet_cap ? g_ayet_cap * 2 : 256;
-                g_ayetler  = realloc(g_ayetler, (size_t)g_ayet_cap * sizeof(Ayet));
-                if (!g_ayetler) { fclose(fp); return -1; }
-            }
-
-            g_ayetler[g_ayet_say].bolum = cur_bolum;
-            g_ayetler[g_ayet_say].ayet  = cur_ayet;
-            strncpy(g_ayetler[g_ayet_say].metin, p, MAX_METIN - 1);
-            g_ayetler[g_ayet_say].metin[MAX_METIN - 1] = '\0';
-            g_ayet_say++;
-            in_verse = 0;
+        int i;
+        for (i = 0; i < 6 && p; i++) {
+            alan[i] = p;
+            p = (i < 5) ? strchr(p, '\t') : NULL;
+            if (p) *p++ = '\0';
         }
-    }
+        if (i < 6) continue;
 
+        int k = atoi(alan[2]) - 1;
+        if (k < 0 || k >= MAX_KITAP) continue;
+
+        if (g_ayet_say >= cap) {
+            cap = cap ? cap * 2 : 32768;
+            Ayet *yeni = realloc(g_ayetler, (size_t)cap * sizeof(Ayet));
+            if (!yeni) { fclose(fp); return -1; }
+            g_ayetler = yeni;
+        }
+        Ayet *a = &g_ayetler[g_ayet_say];
+        a->kitap = k;
+        a->bolum = atoi(alan[3]);
+        a->ayet  = atoi(alan[4]);
+        a->metin = strdup(alan[5]);
+
+        Kitap *kt = &g_kitaplar[k];
+        if (!kt->ad[0]) {
+            snprintf(kt->ad,   sizeof(kt->ad),   "%s", alan[0]);
+            snprintf(kt->kisa, sizeof(kt->kisa), "%s", alan[1]);
+            kt->ilk = g_ayet_say;
+            if (k + 1 > g_kitap_say) g_kitap_say = k + 1;
+        }
+        if (a->bolum > kt->bolum_say) kt->bolum_say = a->bolum;
+        g_ayet_say++;
+    }
     fclose(fp);
     return g_ayet_say;
 }
 
-/* ── Bölüm listesi ───────────────────────────────────────── */
-static int bolum_listesi(int *bolumler, int max)
+static void satir_ekle(int ayet, const char *bas, int uzunluk)
 {
-    int say = 0, prev = -1;
-    for (int i = 0; i < g_ayet_say && say < max; i++) {
-        if (g_ayetler[i].bolum != prev) {
-            bolumler[say++] = g_ayetler[i].bolum;
-            prev = g_ayetler[i].bolum;
-        }
+    if (g_satir_say >= g_satir_cap) {
+        g_satir_cap = g_satir_cap ? g_satir_cap * 2 : 512;
+        g_satirlar  = realloc(g_satirlar, (size_t)g_satir_cap * sizeof(Satir));
+        if (!g_satirlar) { endwin(); exit(1); }
     }
-    return say;
+    g_satirlar[g_satir_say++] = (Satir){ ayet, bas, uzunluk };
 }
 
-/* ── Metni word-wrap ile yaz ─────────────────────────────── */
-static int metin_yaz(WINDOW *win, int y, int x, int genislik, const char *metin)
+/* ── Seçili bölümü verilen genişliğe göre satırlara böl ──── */
+static void bolum_sar(int kitap, int bolum, int genislik)
 {
-    char buf[MAX_METIN];
-    strncpy(buf, metin, MAX_METIN - 1);
-    buf[MAX_METIN - 1] = '\0';
+    g_satir_say = 0;
+    if (genislik < 10) genislik = 10;
 
-    int max_y, max_x;
-    getmaxyx(win, max_y, max_x);
-    (void)max_x;
+    for (int i = g_kitaplar[kitap].ilk;
+         i < g_ayet_say && g_ayetler[i].kitap == kitap; i++) {
+        if (g_ayetler[i].bolum != bolum) continue;
 
-    int cx = x, cy = y, satirlar = 1;
-    char *tok = strtok(buf, " ");
-    while (tok) {
-        int tlen = (int)strlen(tok);
-        if (cx + tlen >= x + genislik) {
-            cy++; cx = x; satirlar++;
-            if (cy >= max_y - 1) break;
+        const char *p = g_ayetler[i].metin;
+        int ilk = 1;
+        while (*p) {
+            /* genişliğe sığan en uzun kelime dizisini bul */
+            const char *son_bosluk = NULL, *q = p;
+            int kr = 0;
+            while (*q && kr < genislik) {
+                if (*q == ' ') son_bosluk = q;
+                if (((unsigned char)*q & 0xC0) != 0x80) kr++;
+                q++;
+            }
+            /* yarım kalan çok baytlı karakteri tamamla */
+            while (*q && ((unsigned char)*q & 0xC0) == 0x80) q++;
+
+            const char *bitis = (*q && *q != ' ' && son_bosluk) ? son_bosluk : q;
+            satir_ekle(ilk ? g_ayetler[i].ayet : 0, p, (int)(bitis - p));
+            ilk = 0;
+            p = bitis;
+            while (*p == ' ') p++;
         }
-        mvwprintw(win, cy, cx, "%s ", tok);
-        cx += tlen + 1;
-        tok = strtok(NULL, " ");
+        satir_ekle(-1, "", 0);    /* ayetler arası boşluk */
     }
-    return satirlar;
 }
+
+/* ── Yardımcılar ─────────────────────────────────────────── */
+static void kisalt_yaz(WINDOW *w, int y, int x, int gen, const char *s)
+{
+    /* s'yi gen karakterle sınırlayıp yaz */
+    int n = (int)strlen(s), b = 0, kr = 0;
+    while (b < n && kr < gen) {
+        b++;
+        while (b < n && ((unsigned char)s[b] & 0xC0) == 0x80) b++;
+        kr++;
+    }
+    mvwaddnstr(w, y, x, s, b);
+    for (; kr < gen; kr++) waddch(w, ' ');
+}
+
+enum { RENK_BASLIK = 1, RENK_SECILI, RENK_NO, RENK_GRUP, RENK_SOLUK };
 
 /* ── Ana TUI ─────────────────────────────────────────────── */
 int main(void)
 {
     setlocale(LC_ALL, "");
 
-    const char *home = getenv("HOME");
-    if (!home) { fprintf(stderr, "HOME bulunamadı\n"); return 1; }
-    snprintf(g_data_file, sizeof(g_data_file), DATA_PATH, home);
+    const char *yol = veri_yolu();
+    if (!yol) {
+        fprintf(stderr, "Veri dosyası (%s) bulunamadı.\n"
+                        "Önce bir kez `incil` çalıştırın; veri otomatik indirilir.\n",
+                VERI_ADI);
+        return 1;
+    }
+    if (veri_yukle(yol) <= 0) {
+        fprintf(stderr, "Veri okunamadı: %s\n", yol);
+        return 1;
+    }
 
     initscr();
     cbreak();
     noecho();
     keypad(stdscr, TRUE);
     curs_set(0);
+    set_escdelay(25);
 
     if (has_colors()) {
         start_color();
         use_default_colors();
-        init_pair(1, COLOR_CYAN,   -1);
-        init_pair(2, COLOR_YELLOW, -1);
-        init_pair(3, COLOR_WHITE,  -1);
-        init_pair(4, COLOR_BLACK,  COLOR_CYAN);
-        init_pair(5, COLOR_GREEN,  -1);
-        init_pair(6, COLOR_BLACK,  COLOR_YELLOW);
+        init_pair(RENK_BASLIK, COLOR_BLACK,  COLOR_CYAN);
+        init_pair(RENK_SECILI, COLOR_BLACK,  COLOR_YELLOW);
+        init_pair(RENK_NO,     COLOR_GREEN,  -1);
+        init_pair(RENK_GRUP,   COLOR_YELLOW, -1);
+        init_pair(RENK_SOLUK,  COLOR_CYAN,   -1);
     }
 
-    int SATIR, SUTUN;
-    getmaxyx(stdscr, SATIR, SUTUN);
+    const int menu_w = 24;
+    int mod       = 0;     /* 0 = kitap listesi, 1 = bölüm listesi */
+    int kitap_sec = 39;    /* Matta */
+    int bolum_sec = 0;     /* 0 tabanlı */
+    int menu_kay  = 0;
+    int metin_kay = 0;
+    int sar_gen   = -1, sar_kitap = -1, sar_bolum = -1;
 
-    int menu_w   = 26;
-    int icerik_x = menu_w + 1;
-
-    WINDOW *header_win  = newwin(2, SUTUN, 0, 0);
-    WINDOW *menu_win    = newwin(SATIR - 3, menu_w, 2, 0);
-    WINDOW *icerik_win  = newwin(SATIR - 3, SUTUN - icerik_x, 2, icerik_x);
-    WINDOW *status_win  = newwin(1, SUTUN, SATIR - 1, 0);
-
-    int mod         = 0;   /* 0=kitap 1=bölüm */
-    int kitap_sec   = 0;
-    int bolum_sec   = 0;
-    int ayet_scroll = 0;
-    int menu_scroll = 0;
-
-    int bolumler[MAX_BOLUM];
-    int bolum_say = 0;
-
-    int ch, yenile = 1;
-
-    while (1) {
-        getmaxyx(stdscr, SATIR, SUTUN);
-        int icerik_w = SUTUN - icerik_x;
-        int gorsel_h = SATIR - 5;
-
-        if (yenile) {
-            /* ── Header ── */
-            werase(header_win);
-            wbkgd(header_win, COLOR_PAIR(4));
-            mvwprintw(header_win, 0, 2,
-                      "incil-tui | Türkçe Yeni Ahit  "
-                      "[↑↓] Gezin  [Enter] Seç  [Bksp] Geri  [q] Çık");
-            wrefresh(header_win);
-
-            /* ── Menü ── */
-            werase(menu_win);
-            box(menu_win, 0, 0);
-
-            if (mod == 0) {
-                mvwprintw(menu_win, 0, 2, " Kitaplar ");
-                for (int i = 0; i < MAX_KITAP; i++) {
-                    int y = i - menu_scroll + 1;
-                    if (y < 1 || y > gorsel_h) continue;
-                    if (i == kitap_sec) {
-                        wattron(menu_win, COLOR_PAIR(6) | A_BOLD);
-                        mvwprintw(menu_win, y, 1, " %-*s", menu_w - 3,
-                                  KITAPLAR[i].ad);
-                        wattroff(menu_win, COLOR_PAIR(6) | A_BOLD);
-                    } else {
-                        mvwprintw(menu_win, y, 2, "%-*s", menu_w - 4,
-                                  KITAPLAR[i].ad);
-                    }
-                }
-            } else {
-                char baslik[48];
-                snprintf(baslik, sizeof(baslik), " %s ", KITAPLAR[kitap_sec].ad);
-                mvwprintw(menu_win, 0, 2, "%s", baslik);
-                for (int i = 0; i < bolum_say; i++) {
-                    int y = i - menu_scroll + 1;
-                    if (y < 1 || y > gorsel_h) continue;
-                    char label[24];
-                    snprintf(label, sizeof(label), "%d. Bölüm", bolumler[i]);
-                    if (i == bolum_sec) {
-                        wattron(menu_win, COLOR_PAIR(6) | A_BOLD);
-                        mvwprintw(menu_win, y, 1, " %-*s", menu_w - 3, label);
-                        wattroff(menu_win, COLOR_PAIR(6) | A_BOLD);
-                    } else {
-                        mvwprintw(menu_win, y, 2, "%-*s", menu_w - 4, label);
-                    }
-                }
-            }
-            wrefresh(menu_win);
-
-            /* ── İçerik ── */
-            werase(icerik_win);
-            box(icerik_win, 0, 0);
-
-            if (mod == 0) {
-                wattron(icerik_win, COLOR_PAIR(1) | A_BOLD);
-                mvwprintw(icerik_win, 2, 3, "%s", KITAPLAR[kitap_sec].ad);
-                wattroff(icerik_win, COLOR_PAIR(1) | A_BOLD);
-                mvwprintw(icerik_win, 4, 3,
-                          "Bir kitap seçmek için Enter'a basın.");
-            } else {
-                int hedef_bolum = bolumler[bolum_sec];
-                wattron(icerik_win, COLOR_PAIR(1) | A_BOLD);
-                mvwprintw(icerik_win, 0, 2, " %s — %d. Bölüm ",
-                          KITAPLAR[kitap_sec].ad, hedef_bolum);
-                wattroff(icerik_win, COLOR_PAIR(1) | A_BOLD);
-
-                int cy = 1 - ayet_scroll;
-                for (int i = 0; i < g_ayet_say; i++) {
-                    if (g_ayetler[i].bolum != hedef_bolum) continue;
-                    if (cy >= 1 && cy < SATIR - 4) {
-                        wattron(icerik_win, COLOR_PAIR(5) | A_BOLD);
-                        mvwprintw(icerik_win, cy, 2, "%d:%d  ",
-                                  g_ayetler[i].bolum, g_ayetler[i].ayet);
-                        wattroff(icerik_win, COLOR_PAIR(5) | A_BOLD);
-                        int satirlar = metin_yaz(icerik_win, cy, 8,
-                                                 icerik_w - 10,
-                                                 g_ayetler[i].metin);
-                        cy += satirlar + 1;
-                    } else {
-                        /* Yaklaşık yükseklik hesapla */
-                        int tahmini = (int)strlen(g_ayetler[i].metin)
-                                      / (icerik_w - 11) + 2;
-                        cy += tahmini;
-                    }
-                }
-            }
-            wrefresh(icerik_win);
-
-            /* ── Status ── */
-            werase(status_win);
-            wbkgd(status_win, COLOR_PAIR(4));
-            if (mod == 1)
-                mvwprintw(status_win, 0, 2, " %s %d. Bölüm  |  "
-                          "↑↓ kaydır  PgUp/PgDn hızlı kaydır",
-                          KITAPLAR[kitap_sec].ad, bolumler[bolum_sec]);
-            else
-                mvwprintw(status_win, 0, 2,
-                          " %d kitap  |  Enter ile seçin",
-                          MAX_KITAP);
-            wrefresh(status_win);
-
-            yenile = 0;
+    for (;;) {
+        int H, W;
+        getmaxyx(stdscr, H, W);
+        int govde_h  = H - 2;            /* üst ve alt çubuk hariç */
+        int liste_h  = govde_h - 2;      /* çerçeve hariç */
+        int metin_w  = W - menu_w;
+        int metin_ic = metin_w - 4 - 5;  /* çerçeve + ayet no sütunu */
+        if (liste_h < 1 || metin_ic < 10) {
+            erase();
+            mvaddstr(0, 0, "Pencere çok küçük");
+            refresh();
+            if (getch() == 'q') break;
+            continue;
         }
 
-        ch = getch();
-        yenile = 1;
+        Kitap *kt = &g_kitaplar[kitap_sec];
+        int bolum = bolum_sec + 1;
+        if (sar_gen != metin_ic || sar_kitap != kitap_sec || sar_bolum != bolum) {
+            bolum_sar(kitap_sec, bolum, metin_ic);
+            sar_gen = metin_ic; sar_kitap = kitap_sec; sar_bolum = bolum;
+        }
+        int metin_h = govde_h - 2;
+        int max_kay = g_satir_say - metin_h;
+        if (max_kay < 0) max_kay = 0;
+        if (metin_kay > max_kay) metin_kay = max_kay;
+        if (metin_kay < 0) metin_kay = 0;
 
+        int liste_say = mod == 0 ? g_kitap_say : kt->bolum_say;
+        int secili    = mod == 0 ? kitap_sec   : bolum_sec;
+        if (secili < menu_kay) menu_kay = secili;
+        if (secili >= menu_kay + liste_h) menu_kay = secili - liste_h + 1;
+
+        erase();
+
+        /* ── Üst çubuk ── */
+        attron(COLOR_PAIR(RENK_BASLIK));
+        mvhline(0, 0, ' ', W);
+        kisalt_yaz(stdscr, 0, 1, W - 2,
+                   "incil-tui · Türkçe Kutsal Kitap (YTC)   "
+                   "↑↓/jk gezin  Enter seç  ⌫ geri  n/p bölüm  "
+                   "PgUp/PgDn kaydır  r rastgele  q çık");
+        attroff(COLOR_PAIR(RENK_BASLIK));
+
+        /* ── Sol menü ── */
+        WINDOW *menu = derwin(stdscr, govde_h, menu_w, 1, 0);
+        box(menu, 0, 0);
+        if (mod == 0) {
+            mvwaddstr(menu, 0, 2, " Kitaplar ");
+        } else {
+            char baslik[96];
+            snprintf(baslik, sizeof(baslik), " %s ", kt->ad);
+            mvwaddstr(menu, 0, 2, baslik);
+        }
+        for (int i = 0; i < liste_h && menu_kay + i < liste_say; i++) {
+            int idx = menu_kay + i;
+            char etiket[96];
+            if (mod == 0)
+                snprintf(etiket, sizeof(etiket), "%s", g_kitaplar[idx].ad);
+            else
+                snprintf(etiket, sizeof(etiket), "%d. Bölüm", idx + 1);
+            if (idx == secili) {
+                wattron(menu, COLOR_PAIR(RENK_SECILI) | A_BOLD);
+                mvwaddch(menu, i + 1, 1, ' ');
+                kisalt_yaz(menu, i + 1, 2, menu_w - 3, etiket);
+                wattroff(menu, COLOR_PAIR(RENK_SECILI) | A_BOLD);
+            } else {
+                if (mod == 0 && idx >= 39) wattron(menu, COLOR_PAIR(RENK_SOLUK));
+                kisalt_yaz(menu, i + 1, 2, menu_w - 3, etiket);
+                if (mod == 0 && idx >= 39) wattroff(menu, COLOR_PAIR(RENK_SOLUK));
+            }
+        }
+        delwin(menu);
+
+        /* ── Metin ── */
+        WINDOW *metin = derwin(stdscr, govde_h, metin_w, 1, menu_w);
+        box(metin, 0, 0);
+        {
+            char baslik[128];
+            snprintf(baslik, sizeof(baslik), " %s %d ", kt->ad, bolum);
+            wattron(metin, A_BOLD);
+            mvwaddstr(metin, 0, 2, baslik);
+            wattroff(metin, A_BOLD);
+        }
+        for (int i = 0; i < metin_h && metin_kay + i < g_satir_say; i++) {
+            Satir *s = &g_satirlar[metin_kay + i];
+            if (s->ayet > 0) {
+                wattron(metin, COLOR_PAIR(RENK_NO) | A_BOLD);
+                mvwprintw(metin, i + 1, 2, "%3d", s->ayet);
+                wattroff(metin, COLOR_PAIR(RENK_NO) | A_BOLD);
+            }
+            if (s->uzunluk > 0)
+                mvwaddnstr(metin, i + 1, 7, s->bas, s->uzunluk);
+        }
+        if (g_satir_say > metin_h) {
+            char yuzde[16];
+            snprintf(yuzde, sizeof(yuzde), " %d%% ", max_kay ? metin_kay * 100 / max_kay : 100);
+            mvwaddstr(metin, govde_h - 1, metin_w - (int)strlen(yuzde) - 2, yuzde);
+        }
+        delwin(metin);
+
+        /* ── Alt çubuk ── */
+        attron(COLOR_PAIR(RENK_BASLIK));
+        mvhline(H - 1, 0, ' ', W);
+        {
+            char durum[256];
+            if (mod == 0)
+                snprintf(durum, sizeof(durum), " %s · %s  |  %d kitap, %d ayet",
+                         kitap_sec < 39 ? "Eski Antlaşma" : "Yeni Antlaşma",
+                         kt->ad, g_kitap_say, g_ayet_say);
+            else
+                snprintf(durum, sizeof(durum), " %s %d / %d  |  Yorumsuz Türkçe Çeviri · CC BY-ND 4.0",
+                         kt->ad, bolum, kt->bolum_say);
+            kisalt_yaz(stdscr, H - 1, 0, W, durum);
+        }
+        attroff(COLOR_PAIR(RENK_BASLIK));
+        refresh();
+
+        /* ── Tuşlar ── */
+        int ch = getch();
         if (ch == 'q' || ch == 'Q') break;
 
-        if (mod == 0) {
-            if (ch == KEY_UP && kitap_sec > 0) {
-                kitap_sec--;
-                if (kitap_sec < menu_scroll) menu_scroll = kitap_sec;
-            } else if (ch == KEY_DOWN && kitap_sec < MAX_KITAP - 1) {
-                kitap_sec++;
-                if (kitap_sec >= menu_scroll + gorsel_h)
-                    menu_scroll = kitap_sec - gorsel_h + 1;
-            } else if (ch == '\n' || ch == KEY_ENTER) {
-                veri_yukle(KITAPLAR[kitap_sec].kod);
-                bolum_say   = bolum_listesi(bolumler, MAX_BOLUM);
-                bolum_sec   = 0;
-                ayet_scroll = 0;
-                menu_scroll = 0;
-                mod = 1;
-            }
-        } else {
-            if (ch == KEY_BACKSPACE || ch == 127 || ch == 'b') {
-                mod = 0;
-                menu_scroll = kitap_sec > 3 ? kitap_sec - 3 : 0;
-            } else if (ch == KEY_UP) {
-                if (ayet_scroll > 0) { ayet_scroll -= 2; }
-                else if (bolum_sec > 0) {
-                    bolum_sec--;
-                    ayet_scroll = 0;
-                    if (bolum_sec < menu_scroll) menu_scroll = bolum_sec;
-                }
-            } else if (ch == KEY_DOWN) {
-                if (bolum_sec < bolum_say - 1) {
-                    bolum_sec++;
-                    ayet_scroll = 0;
-                    if (bolum_sec >= menu_scroll + gorsel_h)
-                        menu_scroll = bolum_sec - gorsel_h + 1;
-                } else {
-                    ayet_scroll += 2;
-                }
-            } else if (ch == KEY_PPAGE) {
-                ayet_scroll -= gorsel_h;
-                if (ayet_scroll < 0) ayet_scroll = 0;
-            } else if (ch == KEY_NPAGE) {
-                ayet_scroll += gorsel_h;
-            }
+        switch (ch) {
+        case KEY_UP: case 'k':
+            if (mod == 0) { if (kitap_sec > 0) { kitap_sec--; bolum_sec = 0; metin_kay = 0; } }
+            else if (bolum_sec > 0) { bolum_sec--; metin_kay = 0; }
+            break;
+        case KEY_DOWN: case 'j':
+            if (mod == 0) { if (kitap_sec < g_kitap_say - 1) { kitap_sec++; bolum_sec = 0; metin_kay = 0; } }
+            else if (bolum_sec < kt->bolum_say - 1) { bolum_sec++; metin_kay = 0; }
+            break;
+        case KEY_HOME: case 'g':
+            if (mod == 0) kitap_sec = 0; else bolum_sec = 0;
+            metin_kay = 0;
+            break;
+        case KEY_END: case 'G':
+            if (mod == 0) kitap_sec = g_kitap_say - 1; else bolum_sec = kt->bolum_say - 1;
+            metin_kay = 0;
+            break;
+        case '\n': case KEY_ENTER: case KEY_RIGHT: case 'l':
+            if (mod == 0) { mod = 1; menu_kay = 0; }
+            break;
+        case KEY_BACKSPACE: case 127: case 8: case KEY_LEFT: case 'h': case 27:
+            if (mod == 1) { mod = 0; menu_kay = 0; }
+            break;
+        case 'n':   /* sonraki bölüm (kitap sonunda bir sonraki kitaba geç) */
+            if (bolum_sec < kt->bolum_say - 1) bolum_sec++;
+            else if (kitap_sec < g_kitap_say - 1) { kitap_sec++; bolum_sec = 0; }
+            metin_kay = 0;
+            break;
+        case 'p':
+            if (bolum_sec > 0) bolum_sec--;
+            else if (kitap_sec > 0) { kitap_sec--; bolum_sec = g_kitaplar[kitap_sec].bolum_say - 1; }
+            metin_kay = 0;
+            break;
+        case KEY_NPAGE: case ' ': case 'J':
+            metin_kay += ch == 'J' ? 1 : metin_h - 1;
+            break;
+        case KEY_PPAGE: case 'b': case 'K':
+            metin_kay -= ch == 'K' ? 1 : metin_h - 1;
+            break;
+        case 'r': {
+            static int tohum = 0;
+            if (!tohum) { srand((unsigned)time(NULL)); tohum = 1; }
+            Ayet *a = &g_ayetler[rand() % g_ayet_say];
+            kitap_sec = a->kitap; bolum_sec = a->bolum - 1; mod = 1;
+            /* ayeti ekranın üstüne getir */
+            bolum_sar(kitap_sec, a->bolum, metin_ic);
+            sar_gen = metin_ic; sar_kitap = kitap_sec; sar_bolum = a->bolum;
+            metin_kay = 0;
+            for (int i = 0; i < g_satir_say; i++)
+                if (g_satirlar[i].ayet == a->ayet) { metin_kay = i; break; }
+            break;
+        }
+        case KEY_RESIZE:
+            sar_gen = -1;
+            break;
         }
     }
 
-    delwin(header_win);
-    delwin(menu_win);
-    delwin(icerik_win);
-    delwin(status_win);
     endwin();
+    for (int i = 0; i < g_ayet_say; i++) free(g_ayetler[i].metin);
     free(g_ayetler);
+    free(g_satirlar);
     return 0;
 }
